@@ -12,7 +12,7 @@ An open-source alternative to Yuma / AbletonGPT.
 - **Ableton Live 12 Control** — create tracks, load devices from the browser, insert MIDI clips with notes, adjust parameters, trigger scenes, read session state via a MIDI Remote Script bridge
 - **MIDI Generation** — chord progressions, drum patterns, melodies exported as `.mid` files (drag into Ableton or auto-insert)
 - **Music Theory Engine** — scales, chords, intervals, GM drum mapping, scale-snapping
-- **Smart Command Parsing** — handles LLM quirks: strips JSON comments, fixes trailing commas, maps hallucinated commands to valid ones, normalizes key aliases
+- **Smart Command Parsing** — handles LLM quirks: strips JSON comments, fixes trailing commas, maps hallucinated commands to valid ones, normalizes key aliases, auto-retries when the LLM forgets to output commands
 - **Device Loading** — loads Ableton instruments (Wavetable, Operator, Drum Rack) and effects (Reverb, Compressor, EQ Eight, Limiter) via the browser API
 - **Local LLM (Ollama)** — runs fully offline with Llama 3.1, Mistral, Command-R, Phi-3, etc.
 - **Cloudflare Workers AI** — optional free-tier cloud inference (`@cf/meta/llama-3.1-70b-instruct`, Gemma, Mistral)

@@ -85,6 +85,26 @@ class LiveMindApp:
 
         # Extract and execute commands.
         commands = extract_commands(llm_text)
+
+        # If the user likely asked for an action but the LLM only gave text,
+        # retry once with a nudge to produce commands.
+        if not commands and _looks_like_action_request(text):
+            nudge = Message(
+                role="user",
+                content="Now output the ```commands block with the JSON array to execute what you just described. Commands only, no explanation.",
+            )
+            try:
+                retry = self.provider.generate(
+                    self.messages + [nudge],
+                    temperature=self.config.get("temperature", 0.7),
+                    max_tokens=int(self.config.get("max_tokens", 2048)),
+                )
+                commands = extract_commands(retry.content)
+                if commands:
+                    llm_text += "\n" + strip_commands(retry.content)
+            except Exception:
+                pass
+
         display_text = strip_commands(llm_text)
         midi_paths: list[Path] = []
 
@@ -166,3 +186,17 @@ def _summarize_state(state: dict[str, Any]) -> str:
         names = [f"{t['index']}:{t['name']}" for t in tracks[:16]]
         parts.append(f"Tracks: {', '.join(names)}")
     return " | ".join(parts)
+
+
+_ACTION_WORDS = {
+    "create", "add", "make", "set", "change", "build", "setup", "start",
+    "delete", "remove", "load", "arm", "mute", "solo", "play", "stop",
+    "fire", "launch", "record", "generate", "tempo", "bpm", "track",
+    "clip", "scene", "device", "project", "beat", "drum", "pattern",
+}
+
+
+def _looks_like_action_request(text: str) -> bool:
+    """Heuristic: does this message look like it wants Ableton commands?"""
+    words = set(text.lower().split())
+    return len(words & _ACTION_WORDS) >= 2
