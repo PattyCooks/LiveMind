@@ -167,6 +167,49 @@ Done!'''
         self.assertIn("Hello!", stripped)
         self.assertIn("Done!", stripped)
 
+    def test_normalize_command_alias(self) -> None:
+        """LLMs sometimes use 'command' instead of 'action' as the key."""
+        text = '''```commands
+[{"command": "create_midi_track", "name": "Bass"}, {"cmd": "set_tempo", "bpm": 128}]
+```'''
+        commands = extract_commands(text)
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[0]["action"], "create_midi_track")
+        self.assertEqual(commands[1]["action"], "set_tempo")
+
+    def test_normalize_skips_empty_action(self) -> None:
+        """Commands with no recognizable action key are silently dropped."""
+        text = '''```commands
+[{"foo": "bar"}, {"action": "play"}]
+```'''
+        commands = extract_commands(text)
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0]["action"], "play")
+
+    def test_json_with_comments(self) -> None:
+        """LLMs sometimes inject // comments into JSON."""
+        text = '''```commands
+[
+  // Set up the project
+  {"action": "set_tempo", "bpm": 140},
+  {"action": "create_midi_track", "name": "Bass"}, // bass track
+]
+```'''
+        commands = extract_commands(text)
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[0]["action"], "set_tempo")
+        self.assertEqual(commands[1]["action"], "create_midi_track")
+
+    def test_hallucinated_action_mapping(self) -> None:
+        """Hallucinated actions like 'create_track' map to valid ones."""
+        text = '''```commands
+[{"action": "create_track", "name": "Lead"}, {"action": "create_aux_track", "name": "FX"}]
+```'''
+        commands = extract_commands(text)
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[0]["action"], "create_midi_track")
+        self.assertEqual(commands[1]["action"], "create_return_track")
+
 
 if __name__ == "__main__":
     unittest.main()

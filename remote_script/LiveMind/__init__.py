@@ -71,8 +71,9 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
             try:
                 data, addr = self._sock_recv.recvfrom(BUFFER_SIZE)
                 command = json.loads(data.decode("utf-8"))
-                # Schedule on Ableton's main thread.
-                self.schedule_message(0, self._handle_command, command, addr)
+                # schedule_message only accepts (delay, callback) or (delay, callback, one_param).
+                # Bundle command+addr into a single parameter via lambda.
+                self.schedule_message(0, lambda cmd=command, a=addr: self._handle_command(cmd, a))
             except socket.timeout:
                 continue
             except Exception:
@@ -88,7 +89,9 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
     def _respond(self, payload: dict[str, Any], addr: tuple[str, int]) -> None:
         data = json.dumps(payload).encode("utf-8")
         try:
-            self._sock_send.sendto(data, (addr[0], SEND_PORT))
+            # Respond to the actual sender (host + port) so the calling
+            # socket receives the reply, not a hard-coded port.
+            self._sock_send.sendto(data, addr)
         except Exception:
             pass
 
@@ -159,9 +162,25 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
             return {"status": "ok"}
 
         if action == "load_device":
-            # Browser-based device loading varies by Live version.
-            # This is a best-effort approach using Live.Song.Song.
-            return {"status": "ok", "detail": "Device loading requires drag-and-drop or Max for Live bridge"}
+            track_idx = cmd.get("track", 0)
+            track = song.tracks[track_idx]
+            uri = cmd.get("uri", "")
+            if not uri:
+                return {"error": "load_device requires a 'uri' parameter"}
+            song.view.selected_track = track
+            app = Live.Application.get_application()
+            browser = app.browser
+            item = self._find_browser_item(uri, browser.instruments)
+            if not item:
+                item = self._find_browser_item(uri, browser.audio_effects)
+            if not item:
+                item = self._find_browser_item(uri, browser.midi_effects)
+            if not item:
+                item = self._find_browser_item(uri, browser.drums)
+            if item:
+                browser.load_item(item)
+                return {"status": "ok", "detail": "Loaded %s on track %d" % (item.name, track_idx)}
+            return {"error": "Device '%s' not found in browser" % uri}
 
         if action == "set_device_param":
             track = song.tracks[cmd["track"]]
@@ -177,6 +196,8 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
 
         if action == "create_midi_clip":
             track = song.tracks[cmd["track"]]
+            if not track.has_midi_input:
+                return {"error": "MIDI clips can only be created on MIDI tracks"}
             scene_idx = cmd["scene"]
             # Ensure enough scenes exist.
             while len(song.scenes) <= scene_idx:
@@ -239,6 +260,27 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
         return {"error": f"Unknown action: {action}"}
 
     # ── State reporting ─────────────────────────────────────────────────
+
+    def _find_browser_item(self, name: str, root: Any, depth: int = 0) -> Any:
+        """Recursively search browser tree for a device by name (max depth 3)."""
+        if depth > 3:
+            return None
+        try:
+            for item in root.children:
+                if name.lower() == item.name.lower() and item.is_loadable:
+                    return item
+            # Partial match on second pass.
+            for item in root.children:
+                if name.lower() in item.name.lower() and item.is_loadable:
+                    return item
+            # Recurse into children.
+            for item in root.children:
+                found = self._find_browser_item(name, item, depth + 1)
+                if found:
+                    return found
+        except Exception:
+            pass
+        return None
 
     def _get_session_state(self, song: Any) -> dict[str, Any]:
         tracks = []

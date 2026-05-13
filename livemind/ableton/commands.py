@@ -38,16 +38,64 @@ def extract_commands(llm_output: str) -> list[dict[str, Any]]:
         match = re.search(pattern, llm_output, re.DOTALL)
         if match:
             raw = match.group(1).strip()
+            # Strip // comments that LLMs sometimes inject into JSON.
+            raw = re.sub(r'//[^\n]*', '', raw)
+            # Strip trailing commas before ] or }.
+            raw = re.sub(r',\s*([\]\}])', r'\1', raw)
             try:
                 parsed = json.loads(raw)
                 if isinstance(parsed, list):
-                    return parsed
+                    return _normalize_commands(parsed)
                 if isinstance(parsed, dict) and "commands" in parsed:
-                    return parsed["commands"]
-                return [parsed]
+                    return _normalize_commands(parsed["commands"])
+                return _normalize_commands([parsed])
             except json.JSONDecodeError:
                 continue
     return []
+
+
+# Map invalid/hallucinated actions to the closest valid action.
+_ACTION_ALIASES: dict[str, str] = {
+    "create_track": "create_midi_track",
+    "create_clip": "create_midi_clip",
+    "create_aux_track": "create_return_track",
+    "create_bus": "create_return_track",
+    "create_mix_bus": "create_return_track",
+    "create_group": "create_midi_track",
+    "create_group_track": "create_midi_track",
+    "rename_track": "set_track_name",
+    "tempo": "set_tempo",
+    "volume": "set_track_volume",
+    "pan": "set_track_pan",
+    "add_device": "load_device",
+    "add_clip": "create_midi_clip",
+    "set_bpm": "set_tempo",
+    "mute": "mute_track",
+    "solo": "solo_track",
+    "arm": "arm_track",
+}
+
+
+def _normalize_commands(commands: list[Any]) -> list[dict[str, Any]]:
+    """Normalize command dicts: fix key aliases and map hallucinated actions."""
+    result: list[dict[str, Any]] = []
+    for cmd in commands:
+        if not isinstance(cmd, dict):
+            continue
+        # Accept common key aliases for the action field.
+        if "action" not in cmd:
+            for alias in ("command", "cmd", "type", "name"):
+                if alias in cmd:
+                    cmd["action"] = cmd.pop(alias)
+                    break
+        action = cmd.get("action", "")
+        # Map hallucinated actions to valid ones.
+        if action in _ACTION_ALIASES:
+            cmd["action"] = _ACTION_ALIASES[action]
+        # Skip entries with no recognizable action.
+        if cmd.get("action"):
+            result.append(cmd)
+    return result
 
 
 def strip_commands(llm_output: str) -> str:
@@ -78,9 +126,12 @@ def _dispatch(action: str, cmd: dict[str, Any], bridge: AbletonBridge) -> Comman
         return _handle_midi_generation(cmd)
 
     # ── Ableton bridge commands ─────────────────────────────────────
+    if not bridge.connected:
+        return CommandResult(action=action, success=False, detail="Ableton not connected")
+
     resp = bridge.send(cmd)
     if resp is None:
-        return CommandResult(action=action, success=False, detail="No response from Ableton (is the Remote Script loaded?)")
+        return CommandResult(action=action, success=False, detail="No response from Ableton (timeout)")
     if resp.get("error"):
         return CommandResult(action=action, success=False, detail=resp["error"])
     return CommandResult(action=action, success=True, detail=resp.get("detail", "OK"))

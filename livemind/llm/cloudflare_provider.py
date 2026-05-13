@@ -76,7 +76,11 @@ class CloudflareProvider(LLMProvider):
 
     def health_check(self) -> bool:
         try:
-            resp = self._client.get("/models/search")
+            resp = self._client.post(
+                f"/run/@cf/meta/llama-3.1-8b-instruct",
+                json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
+                timeout=15.0,
+            )
             return resp.status_code == 200
         except httpx.HTTPError:
             return False

@@ -83,7 +83,9 @@ class AbletonBridge:
         self._sock.sendto(payload, (self.ableton_host, self.send_port))
         try:
             data, _ = self._sock.recvfrom(65536)
-            return json.loads(data.decode("utf-8"))
+            resp = json.loads(data.decode("utf-8"))
+            self._connected = True
+            return resp
         except socket.timeout:
             return None
 

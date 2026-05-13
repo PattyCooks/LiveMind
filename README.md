@@ -9,9 +9,11 @@ An open-source alternative to Yuma / AbletonGPT.
 ## Features
 
 - **AI Chat Interface** — talk naturally about music production: *"Create a deep house chord progression in C minor"*, *"Add a reverb on track 5"*, *"Build me a four-on-the-floor techno pattern"*
-- **Ableton Live 12 Control** — create tracks, insert MIDI clips, adjust parameters, trigger scenes, read session state via a MIDI Remote Script bridge
+- **Ableton Live 12 Control** — create tracks, load devices from the browser, insert MIDI clips with notes, adjust parameters, trigger scenes, read session state via a MIDI Remote Script bridge
 - **MIDI Generation** — chord progressions, drum patterns, melodies exported as `.mid` files (drag into Ableton or auto-insert)
 - **Music Theory Engine** — scales, chords, intervals, GM drum mapping, scale-snapping
+- **Smart Command Parsing** — handles LLM quirks: strips JSON comments, fixes trailing commas, maps hallucinated commands to valid ones, normalizes key aliases
+- **Device Loading** — loads Ableton instruments (Wavetable, Operator, Drum Rack) and effects (Reverb, Compressor, EQ Eight, Limiter) via the browser API
 - **Local LLM (Ollama)** — runs fully offline with Llama 3.1, Mistral, Command-R, Phi-3, etc.
 - **Cloudflare Workers AI** — optional free-tier cloud inference (`@cf/meta/llama-3.1-70b-instruct`, Gemma, Mistral)
 - **Native macOS UI** — Ableton-dark themed CustomTkinter app
@@ -127,7 +129,7 @@ LiveMind/
 │   └── LiveMind/
 │       └── __init__.py             # Ableton MIDI Remote Script
 └── tests/
-    └── __init__.py                 # 22 tests (theory, MIDI gen, command parsing)
+    └── __init__.py                 # 26 tests (theory, MIDI gen, command parsing)
 ```
 
 ---
@@ -216,10 +218,10 @@ Generate a melody in F# minor pentatonic, 8 bars, for the lead track
 ## Tests
 
 ```bash
-python -m pytest tests/__init__.py -v
+python -m unittest tests -v
 ```
 
-22 tests covering music theory, MIDI generation, and command parsing.
+26 tests covering music theory, MIDI generation, command parsing, JSON comment stripping, and hallucinated action mapping.
 
 ---
 
