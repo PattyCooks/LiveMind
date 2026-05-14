@@ -54,17 +54,11 @@ class ChatMessage(ctk.CTkFrame):
         )
         header.grid(row=0, column=0, sticky="w", padx=PADDING, pady=(PADDING, 4))
 
-        body = ctk.CTkTextbox(
-            self, height=1, fg_color="transparent", text_color=TEXT_PRIMARY,
-            font=("SF Pro Display", FONT_SIZE_MD), wrap="word", activate_scrollbars=False,
+        body = ctk.CTkLabel(
+            self, text=content, text_color=TEXT_PRIMARY,
+            font=("SF Pro Display", FONT_SIZE_MD), wraplength=700,
+            justify="left", anchor="nw",
         )
-        body.insert("1.0", content)
-        body.configure(state="disabled")
-        # Auto-size height based on content.
-        lines = content.count("\n") + 1
-        char_width = 80
-        wrapped_lines = sum(max(1, len(line) // char_width + 1) for line in content.split("\n"))
-        body.configure(height=max(30, wrapped_lines * 22))
         body.grid(row=1, column=0, sticky="ew", padx=PADDING, pady=(0, PADDING))
 
         if midi_paths:
@@ -161,6 +155,18 @@ class ChatPanel(ctk.CTkFrame):
         self._msg_count += 1
         msg = ChatMessage(self.history, role=role, content=content, midi_paths=midi_paths)
         msg.grid(row=self._msg_count, column=0, sticky="ew", padx=8, pady=6)
+        self._bind_scroll(msg)
+        self.after(50, self._scroll_to_bottom)
+
+    def _bind_scroll(self, widget: Any) -> None:
+        """Recursively bind mousewheel on all children so scrolling works everywhere."""
+        canvas = self.history._parent_canvas
+        widget.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120 or (1 if e.delta > 0 else -1)), "units"))
+        # macOS trackpad sends smaller deltas.
+        widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
+        widget.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
+        for child in widget.winfo_children():
+            self._bind_scroll(child)
         self.after(50, self._scroll_to_bottom)
 
     def _scroll_to_bottom(self) -> None:

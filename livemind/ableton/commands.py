@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,11 +29,14 @@ def extract_commands(llm_output: str) -> list[dict[str, Any]]:
     """Extract command JSON blocks from LLM response text.
 
     Looks for ```commands ... ``` or ```json ... ``` fenced blocks containing
-    a JSON array of command objects.
+    a JSON array of command objects.  Also handles truncated (unclosed) blocks.
     """
     patterns = [
         r"```commands\s*\n(.*?)```",
         r"```json\s*\n(.*?)```",
+        # Unclosed fenced block (model ran out of tokens).
+        r"```commands\s*\n(.*)",
+        r"```json\s*\n(.*)",
     ]
     for pattern in patterns:
         match = re.search(pattern, llm_output, re.DOTALL)
@@ -49,6 +53,31 @@ def extract_commands(llm_output: str) -> list[dict[str, Any]]:
                 if isinstance(parsed, dict) and "commands" in parsed:
                     return _normalize_commands(parsed["commands"])
                 return _normalize_commands([parsed])
+            except json.JSONDecodeError:
+                # Truncated JSON — try to salvage complete objects.
+                salvaged = _salvage_truncated_json(raw)
+                if salvaged:
+                    return _normalize_commands(salvaged)
+                continue
+    return []
+
+
+def _salvage_truncated_json(raw: str) -> list[dict[str, Any]]:
+    """Try to recover valid command objects from truncated JSON arrays."""
+    # Find last complete object by looking for the last "},"  or "}" before truncation.
+    # Strategy: keep removing trailing incomplete content until we get valid JSON.
+    raw = raw.rstrip()
+    # Try closing the array at successively earlier positions.
+    for i in range(len(raw) - 1, 0, -1):
+        if raw[i] == '}':
+            attempt = raw[:i + 1] + ']'
+            # Ensure it starts with [
+            if not attempt.lstrip().startswith('['):
+                attempt = '[' + attempt.lstrip()
+            try:
+                parsed = json.loads(attempt)
+                if isinstance(parsed, list) and len(parsed) > 0:
+                    return parsed
             except json.JSONDecodeError:
                 continue
     return []
@@ -73,6 +102,9 @@ _ACTION_ALIASES: dict[str, str] = {
     "mute": "mute_track",
     "solo": "solo_track",
     "arm": "arm_track",
+    "add_track_to_group": "",
+    "group_tracks": "",
+    "move_track": "",
 }
 
 
@@ -115,6 +147,10 @@ def execute_commands(
         try:
             result = _dispatch(action, cmd, bridge)
             results.append(result)
+            # Small delay after load_device / create_*_track so Ableton
+            # finishes processing before the next command arrives.
+            if action in ("load_device", "create_midi_track", "create_audio_track", "create_return_track"):
+                time.sleep(0.3)
         except Exception as exc:
             results.append(CommandResult(action=action, success=False, detail=str(exc)))
     return results
@@ -126,9 +162,6 @@ def _dispatch(action: str, cmd: dict[str, Any], bridge: AbletonBridge) -> Comman
         return _handle_midi_generation(cmd)
 
     # ── Ableton bridge commands ─────────────────────────────────────
-    if not bridge.connected:
-        return CommandResult(action=action, success=False, detail="Ableton not connected")
-
     resp = bridge.send(cmd)
     if resp is None:
         return CommandResult(action=action, success=False, detail="No response from Ableton (timeout)")

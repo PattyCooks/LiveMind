@@ -44,7 +44,11 @@ class SettingsPanel(ctk.CTkScrollableFrame):
 
         # ── LLM Provider ───────────────────────────────────────────────
         row = self._section_header("LLM Provider", row)
-        row = self._add_dropdown("llm_provider", "Provider", ["ollama", "cloudflare"], row)
+        row = self._add_dropdown("llm_provider", "Provider", ["groq", "openai", "ollama", "cloudflare"], row)
+        row = self._add_entry("groq_api_key", "Groq API Key", row, show="•")
+        row = self._add_entry("groq_model", "Groq Model", row)
+        row = self._add_entry("openai_api_key", "OpenAI API Key", row, show="•")
+        row = self._add_entry("openai_model", "OpenAI Model", row)
         row = self._add_entry("ollama_url", "Ollama URL", row)
         row = self._add_entry("ollama_model", "Ollama Model", row)
         row = self._add_entry("cloudflare_account_id", "Cloudflare Account ID", row)

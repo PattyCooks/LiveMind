@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import threading
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,28 @@ from livemind.ableton.commands import CommandResult, execute_commands, extract_c
 from livemind.config import load_config, save_config
 from livemind.llm import LLMProvider, Message
 from livemind.llm.prompts import SYSTEM_PROMPT
+
+
+def _ensure_ollama_running(base_url: str = "http://127.0.0.1:11434") -> None:
+    """Start Ollama if it isn't already responding."""
+    import httpx
+    try:
+        httpx.get(f"{base_url}/api/tags", timeout=2.0)
+    except (httpx.ConnectError, httpx.TimeoutException):
+        subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Give it a moment to bind the port.
+        import time
+        for _ in range(10):
+            time.sleep(1)
+            try:
+                httpx.get(f"{base_url}/api/tags", timeout=2.0)
+                return
+            except (httpx.ConnectError, httpx.TimeoutException):
+                continue
 
 
 class LiveMindApp:
@@ -26,16 +49,21 @@ class LiveMindApp:
         self.provider: LLMProvider | None = None
         self.messages: list[Message] = [Message(role="system", content=SYSTEM_PROMPT)]
         self.window: Any = None  # Set after GUI init.
+        self._device_list: str = ""  # Cached device list from Ableton.
 
         self._init_provider()
         self.bridge.start()
+        # Probe Ableton so bridge.connected is set before the first user message.
+        self.bridge.ping()
 
     def _init_provider(self) -> None:
         provider_name = self.config.get("llm_provider", "ollama")
         if provider_name == "ollama":
+            ollama_url = self.config.get("ollama_url", "http://127.0.0.1:11434")
+            _ensure_ollama_running(ollama_url)
             from livemind.llm.ollama_provider import OllamaProvider
             self.provider = OllamaProvider(
-                base_url=self.config.get("ollama_url", "http://127.0.0.1:11434"),
+                base_url=ollama_url,
                 model=self.config.get("ollama_model", "llama3.1"),
             )
         elif provider_name == "cloudflare":
@@ -44,6 +72,18 @@ class LiveMindApp:
                 account_id=self.config.get("cloudflare_account_id", ""),
                 api_token=self.config.get("cloudflare_api_token", ""),
                 model=self.config.get("cloudflare_model", "@cf/meta/llama-3.1-70b-instruct"),
+            )
+        elif provider_name == "openai":
+            from livemind.llm.openai_provider import OpenAIProvider
+            self.provider = OpenAIProvider(
+                api_key=self.config.get("openai_api_key", ""),
+                model=self.config.get("openai_model", "gpt-4o-mini"),
+            )
+        elif provider_name == "groq":
+            from livemind.llm.groq_provider import GroqProvider
+            self.provider = GroqProvider(
+                api_key=self.config.get("groq_api_key", ""),
+                model=self.config.get("groq_model", "llama-3.3-70b-versatile"),
             )
 
     # ── Message handling ────────────────────────────────────────────────
@@ -65,6 +105,11 @@ class LiveMindApp:
             if state:
                 context_msg = f"[Current Ableton state: {_summarize_state(state)}]"
                 self.messages.append(Message(role="system", content=context_msg))
+            if self._device_list:
+                self.messages.append(Message(
+                    role="system",
+                    content=f"[Available devices in this Ableton install: {self._device_list}] ONLY use load_device with names from this list.",
+                ))
 
         if not self.provider:
             self._post_response("LLM provider not configured. Go to Settings to set up Ollama or Cloudflare.")
@@ -74,12 +119,14 @@ class LiveMindApp:
             response = self.provider.generate(
                 self.messages,
                 temperature=self.config.get("temperature", 0.7),
-                max_tokens=int(self.config.get("max_tokens", 2048)),
+                max_tokens=int(self.config.get("max_tokens", 4096)),
             )
             llm_text = response.content
         except Exception as exc:
-            self._post_response(f"LLM error: {exc}")
-            return
+            # Auto-failover: try local Ollama if the primary provider fails.
+            llm_text = self._try_ollama_fallback(exc)
+            if llm_text is None:
+                return
 
         self.messages.append(Message(role="assistant", content=llm_text))
 
@@ -124,6 +171,26 @@ class LiveMindApp:
         if self.window:
             self.window.after(0, self._add_response, text, midi_paths)
 
+    def _try_ollama_fallback(self, original_error: Exception) -> str | None:
+        """Try local Ollama as fallback when the primary LLM provider fails."""
+        from livemind.llm.ollama_provider import OllamaProvider
+        fallback_url = self.config.get("ollama_url", "http://127.0.0.1:11434")
+        fallback_model = self.config.get("ollama_model", "qwen3:0.6b")
+        try:
+            fallback = OllamaProvider(base_url=fallback_url, model=fallback_model)
+            if not fallback.health_check():
+                self._post_response(f"LLM error: {original_error}\n\n(Ollama fallback not available — is it running?)")
+                return None
+            response = fallback.generate(
+                self.messages,
+                temperature=self.config.get("temperature", 0.7),
+                max_tokens=int(self.config.get("max_tokens", 2048)),
+            )
+            return response.content
+        except Exception:
+            self._post_response(f"LLM error: {original_error}\n\n(Ollama fallback also failed)")
+            return None
+
     def _add_response(self, text: str, midi_paths: list[Path] | None) -> None:
         self.window.chat_panel.add_message("assistant", text, midi_paths=midi_paths)
         self.window.chat_panel.set_thinking(False)
@@ -150,10 +217,39 @@ class LiveMindApp:
             ableton_ok = self.bridge.ping()
             llm_ok = self.provider.health_check() if self.provider else False
             provider_name = self.config.get("llm_provider", "unknown")
+            # If primary LLM is down, check if Ollama fallback is available.
+            if not llm_ok and provider_name != "ollama":
+                from livemind.llm.ollama_provider import OllamaProvider
+                try:
+                    fb = OllamaProvider(
+                        base_url=self.config.get("ollama_url", "http://127.0.0.1:11434"),
+                        model=self.config.get("ollama_model", "llama3.1:8b"),
+                    )
+                    if fb.health_check():
+                        llm_ok = True
+                        provider_name = f"{provider_name} → ollama (fallback)"
+                except Exception:
+                    pass
+            # Scan available devices once on first successful connection.
+            if ableton_ok and not self._device_list:
+                self._scan_devices()
             if self.window:
                 self.window.after(0, self.window.set_ableton_status, ableton_ok)
                 self.window.after(0, self.window.set_llm_status, llm_ok, provider_name)
         threading.Thread(target=check, daemon=True).start()
+
+    def _scan_devices(self) -> None:
+        """Fetch available devices from Ableton and cache for LLM context."""
+        resp = self.bridge.list_devices()
+        if not resp or resp.get("error"):
+            return
+        devices = resp.get("devices", {})
+        parts: list[str] = []
+        for category, names in devices.items():
+            if names:
+                parts.append(f"{category}: {', '.join(names[:50])}")
+        if parts:
+            self._device_list = " | ".join(parts)
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 

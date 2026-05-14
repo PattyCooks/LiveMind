@@ -36,6 +36,8 @@ class AbletonBridge:
         """Begin listening for responses from Ableton."""
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         self._listener.bind(("127.0.0.1", self.recv_port))
         self._listener.settimeout(1.0)
         self._stop.clear()
@@ -102,6 +104,10 @@ class AbletonBridge:
 
     def get_session_state(self) -> dict[str, Any] | None:
         return self.send({"action": "get_session_state"})
+
+    def list_devices(self) -> dict[str, Any] | None:
+        """Get all available devices/plugins from Ableton's browser."""
+        return self.send({"action": "list_devices"})
 
     def create_midi_track(self, name: str, index: int = -1) -> dict[str, Any] | None:
         return self.send({"action": "create_midi_track", "name": name, "index": index})

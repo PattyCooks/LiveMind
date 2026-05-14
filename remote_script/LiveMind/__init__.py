@@ -22,6 +22,8 @@ import threading
 import traceback
 from typing import Any
 
+import Live  # Ableton Live Object Model
+
 # Ableton's Python environment provides these.
 # These imports only work inside Ableton Live.
 try:
@@ -53,6 +55,7 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
         self._sock_recv.settimeout(0.5)
         self._sock_send = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._stop = threading.Event()
+        self._browser_cache: dict[str, Any] = {}  # Cache browser items by lowercase name.
         self._listener = threading.Thread(target=self._listen, daemon=True, name="livemind-udp")
         self._listener.start()
         self.log_message("LiveMind Remote Script loaded — listening on port %d" % RECV_PORT)
@@ -107,6 +110,9 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
         if action == "get_session_state":
             return self._get_session_state(song)
 
+        if action == "list_devices":
+            return self._list_available_devices()
+
         if action == "create_midi_track":
             idx = cmd.get("index", -1)
             song.create_midi_track(idx if idx >= 0 else len(song.tracks))
@@ -124,7 +130,12 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
             return {"status": "ok", "detail": "Audio track created", "index": list(song.tracks).index(track)}
 
         if action == "create_return_track":
-            song.create_return_track()
+            if len(song.return_tracks) >= 12:
+                return {"error": "Return track limit reached for this Ableton edition"}
+            try:
+                song.create_return_track()
+            except Exception as exc:
+                return {"error": "Cannot create return track: %s" % str(exc)}
             track = song.return_tracks[-1]
             if cmd.get("name"):
                 track.name = cmd["name"]
@@ -163,20 +174,37 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
 
         if action == "load_device":
             track_idx = cmd.get("track", 0)
-            track = song.tracks[track_idx]
             uri = cmd.get("uri", "")
             if not uri:
                 return {"error": "load_device requires a 'uri' parameter"}
+            # Support loading on regular tracks or return tracks.
+            num_tracks = len(song.tracks)
+            if track_idx < num_tracks:
+                track = song.tracks[track_idx]
+            elif track_idx < num_tracks + len(song.return_tracks):
+                track = song.return_tracks[track_idx - num_tracks]
+            else:
+                return {"error": "Track index %d out of range" % track_idx}
             song.view.selected_track = track
             app = Live.Application.get_application()
             browser = app.browser
-            item = self._find_browser_item(uri, browser.instruments)
+            # Check cache first for instant lookups.
+            cache_key = uri.lower()
+            item = self._browser_cache.get(cache_key)
             if not item:
-                item = self._find_browser_item(uri, browser.audio_effects)
-            if not item:
-                item = self._find_browser_item(uri, browser.midi_effects)
-            if not item:
-                item = self._find_browser_item(uri, browser.drums)
+                categories = [
+                    browser.instruments,
+                    browser.audio_effects,
+                    browser.midi_effects,
+                    browser.drums,
+                ]
+                if hasattr(browser, "plugins"):
+                    categories.append(browser.plugins)
+                for category in categories:
+                    item = self._find_browser_item(uri, category)
+                    if item:
+                        self._browser_cache[cache_key] = item
+                        break
             if item:
                 browser.load_item(item)
                 return {"status": "ok", "detail": "Loaded %s on track %d" % (item.name, track_idx)}
@@ -195,9 +223,12 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
             return {"status": "ok"}
 
         if action == "create_midi_clip":
-            track = song.tracks[cmd["track"]]
+            track_idx = cmd["track"]
+            if track_idx >= len(song.tracks):
+                return {"error": "Track index %d out of range (only %d tracks exist)" % (track_idx, len(song.tracks))}
+            track = song.tracks[track_idx]
             if not track.has_midi_input:
-                return {"error": "MIDI clips can only be created on MIDI tracks"}
+                return {"error": "Track %d (%s) is not a MIDI track" % (track_idx, track.name)}
             scene_idx = cmd["scene"]
             # Ensure enough scenes exist.
             while len(song.scenes) <= scene_idx:
@@ -209,17 +240,19 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
             clip_slot.create_clip(length)
             clip = clip_slot.clip
             clip.name = cmd.get("name", "LiveMind")
-            # Add notes.
+            # Add notes using the Live 12 API (add_new_notes).
             notes = cmd.get("notes", [])
             if notes:
-                clip.deselect_all_notes()
+                spec_list = []
                 for n in notes:
                     pitch = int(n.get("pitch", 60))
                     start = float(n.get("start", 0))
-                    dur = float(n.get("duration", 1))
-                    vel = int(n.get("velocity", 100))
-                    # Live API: add_new_notes expects a tuple-of-tuples.
-                    clip.set_notes(((pitch, start, dur, vel, False),))
+                    dur = max(0.1, float(n.get("duration", 1)))
+                    vel = float(n.get("velocity", 100))
+                    ns = Live.Clip.MidiNoteSpecification(pitch, start, dur, vel, False)
+                    spec_list.append(ns)
+                clip.add_new_notes(tuple(spec_list))
+                self.log_message("LiveMind: added %d notes to clip" % len(spec_list))
             return {"status": "ok", "detail": f"MIDI clip created on track {cmd['track']} scene {scene_idx}"}
 
         if action == "delete_clip":
@@ -241,6 +274,24 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
             song.scenes[cmd["scene"]].fire()
             return {"status": "ok"}
 
+        if action == "record_to_arrangement":
+            # Fire the scene and record into arrangement view.
+            scene_idx = cmd.get("scene", 0)
+            bars = int(cmd.get("bars", 4))
+            scene = song.scenes[scene_idx]
+            # Calculate duration in ms from scene tempo.
+            beats = bars * 4  # assuming 4/4 time
+            ms_per_beat = 60000.0 / song.tempo
+            duration_ms = int(beats * ms_per_beat)
+            # Stop first, go to start, enable arrangement record.
+            song.stop_playing()
+            song.current_song_time = 0.0
+            song.record_mode = 1  # arrangement record
+            scene.fire()
+            # Schedule stop after the duration.
+            self.schedule_message(duration_ms, self._stop_arrangement_record)
+            return {"status": "ok", "detail": f"Recording scene {scene_idx} to arrangement ({bars} bars)"}
+
         if action == "create_scene":
             song.create_scene(cmd.get("index", -1))
             return {"status": "ok"}
@@ -259,25 +310,35 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
 
         return {"error": f"Unknown action: {action}"}
 
+    def _stop_arrangement_record(self):
+        """Callback to stop arrangement recording."""
+        song = self.song()
+        song.record_mode = 0
+        song.stop_playing()
+        self.log_message("LiveMind: arrangement recording stopped")
+
     # ── State reporting ─────────────────────────────────────────────────
 
     def _find_browser_item(self, name: str, root: Any, depth: int = 0) -> Any:
         """Recursively search browser tree for a device by name (max depth 3)."""
         if depth > 3:
             return None
+        name_lower = name.lower()
         try:
+            # Exact match first (fast path).
             for item in root.children:
-                if name.lower() == item.name.lower() and item.is_loadable:
+                if name_lower == item.name.lower() and item.is_loadable:
                     return item
             # Partial match on second pass.
             for item in root.children:
-                if name.lower() in item.name.lower() and item.is_loadable:
+                if name_lower in item.name.lower() and item.is_loadable:
                     return item
-            # Recurse into children.
+            # Recurse into non-loadable children (folders).
             for item in root.children:
-                found = self._find_browser_item(name, item, depth + 1)
-                if found:
-                    return found
+                if not item.is_loadable:
+                    found = self._find_browser_item(name, item, depth + 1)
+                    if found:
+                        return found
         except Exception:
             pass
         return None
@@ -313,3 +374,38 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
             "scene_count": len(song.scenes),
             "tracks": tracks,
         }
+
+    def _list_available_devices(self) -> dict[str, Any]:
+        """Scan the browser and return all loadable device names."""
+        app = Live.Application.get_application()
+        browser = app.browser
+        result: dict[str, list[str]] = {
+            "instruments": [],
+            "audio_effects": [],
+            "midi_effects": [],
+            "drums": [],
+            "plugins": [],
+        }
+        category_map = [
+            ("instruments", browser.instruments),
+            ("audio_effects", browser.audio_effects),
+            ("midi_effects", browser.midi_effects),
+            ("drums", browser.drums),
+        ]
+        if hasattr(browser, "plugins"):
+            category_map.append(("plugins", browser.plugins))
+        for key, root in category_map:
+            self._collect_device_names(root, result[key], depth=0)
+        return {"status": "ok", "devices": result}
+
+    def _collect_device_names(self, root: Any, names: list[str], depth: int) -> None:
+        if depth > 3:
+            return
+        try:
+            for item in root.children:
+                if item.is_loadable:
+                    names.append(item.name)
+                else:
+                    self._collect_device_names(item, names, depth + 1)
+        except Exception:
+            pass
