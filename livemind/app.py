@@ -12,6 +12,7 @@ from livemind.ableton.commands import CommandResult, execute_commands, extract_c
 from livemind.config import load_config, save_config
 from livemind.llm import LLMProvider, Message
 from livemind.llm.prompts import SYSTEM_PROMPT
+from livemind.presets import detect_genre, detect_element, detect_plugin_request, generate_preset, generate_element
 
 
 def _ensure_ollama_running(base_url: str = "http://127.0.0.1:11434") -> None:
@@ -98,6 +99,70 @@ class LiveMindApp:
 
     def _process_message(self, text: str) -> None:
         self.messages.append(Message(role="user", content=text))
+
+        # ── Get generator settings from the GUI panel ───────────────────
+        gen_settings = None
+        if self.window and hasattr(self.window, 'generator_panel'):
+            gen_settings = self.window.generator_panel.get_settings()
+
+        gen_mode = (gen_settings or {}).get("mode", "preset")
+
+        # ── Genre preset shortcut ───────────────────────────────────────
+        # If a genre keyword is detected and mode is "preset", use
+        # hardcoded music-theory-correct patterns instead of the LLM.
+        genre = detect_genre(text)
+        if genre and gen_mode == "preset":
+            preset_commands = generate_preset(genre, gen_settings)
+            if preset_commands:
+                results = execute_commands(preset_commands, self.bridge)
+                result_lines: list[str] = []
+                for r in results:
+                    icon = "✅" if r.success else "❌"
+                    result_lines.append(f"{icon} {r.action}: {r.detail}")
+                display = f"🎵 Generated **{genre}** preset with {len(preset_commands)} commands:\n\n" + "\n".join(result_lines)
+                self.messages.append(Message(role="assistant", content=display))
+                self._post_response(display)
+                return
+
+        # ── Element preset shortcut ─────────────────────────────────────
+        # If no genre matched, check for element-specific requests like
+        # "bass line", "drums", "melody" etc. These bypass the weak LLM
+        # and generate proper single-track presets.
+        element = detect_element(text)
+        if element and gen_mode == "preset":
+            plugin = detect_plugin_request(text)
+            elem_commands = generate_element(element, gen_settings, device_override=plugin, user_text=text)
+            if elem_commands:
+                results = execute_commands(elem_commands, self.bridge)
+                result_lines = []
+                for r in results:
+                    icon = "✅" if r.success else "❌"
+                    result_lines.append(f"{icon} {r.action}: {r.detail}")
+                device_info = f" with **{plugin}**" if plugin else ""
+                display = (
+                    f"🎵 Generated **{element}**{device_info} — "
+                    f"{len(elem_commands)} commands:\n\n" + "\n".join(result_lines)
+                )
+                self.messages.append(Message(role="assistant", content=display))
+                self._post_response(display)
+                return
+
+        # ── Inject generator settings as LLM context ────────────────────
+        if gen_settings:
+            elems = gen_settings.get("elements", {})
+            active = [k for k, v in elems.items() if v]
+            structs = gen_settings.get("structure", {})
+            active_struct = [k for k, v in structs.items() if v]
+            intensity = gen_settings.get("intensity", 0.5)
+            bars = gen_settings.get("bars", 4)
+            intensity_label = "chill" if intensity < 0.25 else "medium" if intensity < 0.5 else "hard" if intensity < 0.75 else "INSANE DEGEN"
+            ctx = (
+                f"[Generator settings: intensity={intensity_label}, bars={bars}, "
+                f"elements={', '.join(active)}, structure={', '.join(active_struct) if active_struct else 'none'}, "
+                f"record_to_arrangement={'yes' if gen_settings.get('record_to_arrangement') else 'no'}] "
+                f"Follow these settings when generating commands."
+            )
+            self.messages.append(Message(role="system", content=ctx))
 
         # Append current Ableton state as context if connected.
         if self.bridge.connected:

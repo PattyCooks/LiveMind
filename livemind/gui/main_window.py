@@ -30,6 +30,7 @@ from livemind.gui import (
     configure_theme,
 )
 from livemind.gui.chat_panel import ChatPanel
+from livemind.gui.generator_panel import GeneratorPanel
 from livemind.gui.settings_panel import SettingsPanel
 
 
@@ -103,6 +104,15 @@ class MainWindow(ctk.CTk):
         )
         self._nav_settings.grid(row=3, column=0, padx=PADDING, pady=4, sticky="ew")
 
+        self._nav_generator = ctk.CTkButton(
+            sidebar, text="🎛  Generator", anchor="w",
+            fg_color="transparent", hover_color=BG_CARD,
+            font=("SF Pro Display", FONT_SIZE_MD), height=40,
+            corner_radius=CORNER_RADIUS,
+            command=lambda: self._show_panel("generator"),
+        )
+        self._nav_generator.grid(row=4, column=0, padx=PADDING, pady=4, sticky="ew")
+
         # Spacer
         spacer = ctk.CTkFrame(sidebar, fg_color="transparent")
         spacer.grid(row=5, column=0, sticky="ns")
@@ -135,8 +145,9 @@ class MainWindow(ctk.CTk):
         self.settings_panel = SettingsPanel(
             self._content_frame, config=self.config_data, on_save=self._on_save_settings,
         )
+        self.generator_panel = GeneratorPanel(self._content_frame)
 
-        self._panels = {"chat": self.chat_panel, "settings": self.settings_panel}
+        self._panels = {"chat": self.chat_panel, "settings": self.settings_panel, "generator": self.generator_panel}
         self._current_panel = "chat"
         self.chat_panel.grid(row=0, column=0, sticky="nsew")
 
@@ -148,7 +159,7 @@ class MainWindow(ctk.CTk):
         self._current_panel = name
 
         # Update nav button highlights.
-        for key, btn in [("chat", self._nav_chat), ("settings", self._nav_settings)]:
+        for key, btn in [("chat", self._nav_chat), ("settings", self._nav_settings), ("generator", self._nav_generator)]:
             if key == name:
                 btn.configure(fg_color=ACCENT)
             else:

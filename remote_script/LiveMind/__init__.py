@@ -192,22 +192,42 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
             cache_key = uri.lower()
             item = self._browser_cache.get(cache_key)
             if not item:
-                categories = [
-                    browser.instruments,
-                    browser.audio_effects,
-                    browser.midi_effects,
-                    browser.drums,
-                ]
-                if hasattr(browser, "plugins"):
-                    categories.append(browser.plugins)
+                # Known instruments — only search instruments and drums.
+                known_instruments = {
+                    "operator", "wavetable", "analog", "simpler", "sampler",
+                    "collision", "tension", "electric", "drift", "meld",
+                    "drum rack",
+                }
+                is_known_instrument = uri.lower() in known_instruments
+                if is_known_instrument:
+                    categories = [browser.instruments, browser.drums]
+                else:
+                    categories = [
+                        browser.instruments,
+                        browser.drums,
+                        browser.audio_effects,
+                        browser.midi_effects,
+                    ]
+                    if hasattr(browser, "sounds"):
+                        categories.append(browser.sounds)
+                    if hasattr(browser, "plugins"):
+                        categories.append(browser.plugins)
                 for category in categories:
-                    item = self._find_browser_item(uri, category)
+                    item = self._find_browser_item(uri, category, exact_only=is_known_instrument)
                     if item:
                         self._browser_cache[cache_key] = item
                         break
             if item:
                 browser.load_item(item)
+                # Verify track stayed MIDI after loading.
+                try:
+                    actual_track = song.tracks[track_idx] if track_idx < len(song.tracks) else None
+                    if actual_track and not actual_track.has_midi_input:
+                        return {"status": "ok", "detail": "Loaded %s on track %d (WARNING: track became Audio)" % (item.name, track_idx)}
+                except Exception:
+                    pass
                 return {"status": "ok", "detail": "Loaded %s on track %d" % (item.name, track_idx)}
+            self.log_message("LiveMind: Device '%s' not found in browser (searched %d categories, known=%s)" % (uri, len(categories), is_known_instrument))
             return {"error": "Device '%s' not found in browser" % uri}
 
         if action == "set_device_param":
@@ -319,9 +339,9 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
 
     # ── State reporting ─────────────────────────────────────────────────
 
-    def _find_browser_item(self, name: str, root: Any, depth: int = 0) -> Any:
-        """Recursively search browser tree for a device by name (max depth 3)."""
-        if depth > 3:
+    def _find_browser_item(self, name: str, root: Any, depth: int = 0, exact_only: bool = False) -> Any:
+        """Recursively search browser tree for a device by name (max depth 4)."""
+        if depth > 4:
             return None
         name_lower = name.lower()
         try:
@@ -329,14 +349,16 @@ class LiveMindControlSurface(ControlSurface):  # type: ignore[misc]
             for item in root.children:
                 if name_lower == item.name.lower() and item.is_loadable:
                     return item
-            # Partial match on second pass.
-            for item in root.children:
-                if name_lower in item.name.lower() and item.is_loadable:
-                    return item
+            # Partial match on second pass (skip for known instruments to avoid
+            # matching wrong presets like "Wavetable Preset Pack").
+            if not exact_only:
+                for item in root.children:
+                    if name_lower in item.name.lower() and item.is_loadable:
+                        return item
             # Recurse into non-loadable children (folders).
             for item in root.children:
                 if not item.is_loadable:
-                    found = self._find_browser_item(name, item, depth + 1)
+                    found = self._find_browser_item(name, item, depth + 1, exact_only)
                     if found:
                         return found
         except Exception:

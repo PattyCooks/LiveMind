@@ -161,10 +161,11 @@ class ChatPanel(ctk.CTkFrame):
     def _bind_scroll(self, widget: Any) -> None:
         """Recursively bind mousewheel on all children so scrolling works everywhere."""
         canvas = self.history._parent_canvas
-        widget.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120 or (1 if e.delta > 0 else -1)), "units"))
-        # macOS trackpad sends smaller deltas.
-        widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-3, "units"))
-        widget.bind("<Button-5>", lambda e: canvas.yview_scroll(3, "units"))
+        # macOS trackpad/mouse sends delta as ±1..±5 (not ±120 like Windows)
+        widget.bind("<MouseWheel>", lambda e: canvas.yview_scroll(
+            int(-1 * (e.delta / 120)) if abs(e.delta) >= 120 else (-1 if e.delta > 0 else 1),
+            "units",
+        ))
         for child in widget.winfo_children():
             self._bind_scroll(child)
         self.after(50, self._scroll_to_bottom)

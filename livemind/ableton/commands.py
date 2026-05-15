@@ -23,6 +23,7 @@ class CommandResult:
     success: bool
     detail: str = ""
     midi_path: Path | None = None
+    raw_response: dict[str, Any] | None = None  # Full response from Ableton.
 
 
 def extract_commands(llm_output: str) -> list[dict[str, Any]]:
@@ -140,20 +141,59 @@ def execute_commands(
     commands: list[dict[str, Any]],
     bridge: AbletonBridge,
 ) -> list[CommandResult]:
-    """Execute a list of parsed commands against Ableton and/or MIDI generators."""
+    """Execute a list of parsed commands against Ableton and/or MIDI generators.
+
+    Handles track index remapping: presets use sequential indices (0, 1, 2...)
+    but Ableton may already have tracks, so create_midi_track returns the real
+    index and we remap all subsequent track references.
+    """
     results: list[CommandResult] = []
+    # Map preset track index → actual Ableton track index.
+    track_map: dict[int, int] = {}
+    next_preset_idx = 0  # Which preset index we're on.
+
     for cmd in commands:
         action = cmd.get("action", "")
+
+        # Remap track index for commands that reference a track.
+        if "track" in cmd and action not in ("create_midi_track", "create_audio_track"):
+            preset_idx = cmd["track"]
+            if preset_idx in track_map:
+                cmd = {**cmd, "track": track_map[preset_idx]}
+
         try:
             result = _dispatch(action, cmd, bridge)
+
+            # When a track is created, capture its real index for remapping.
+            if action in ("create_midi_track", "create_audio_track"):
+                actual_idx = _extract_track_index(result, bridge)
+                if actual_idx is not None:
+                    track_map[next_preset_idx] = actual_idx
+                next_preset_idx += 1
+
             results.append(result)
-            # Small delay after load_device / create_*_track so Ableton
+            # Delay after load_device / create_*_track so Ableton
             # finishes processing before the next command arrives.
-            if action in ("load_device", "create_midi_track", "create_audio_track", "create_return_track"):
+            if action in ("create_midi_track", "create_audio_track", "create_return_track"):
                 time.sleep(0.3)
+            elif action == "load_device":
+                time.sleep(0.5)  # Devices need more time to load fully.
         except Exception as exc:
             results.append(CommandResult(action=action, success=False, detail=str(exc)))
     return results
+
+
+def _extract_track_index(result: CommandResult, bridge: AbletonBridge) -> int | None:
+    """Extract the actual track index from a create_track response."""
+    # Best case: remote script returned the index directly.
+    if result.raw_response and "index" in result.raw_response:
+        return result.raw_response["index"]
+    # Fallback (e.g. timeout): ping Ableton for current track count.
+    # The last track is the most recently created one.
+    resp = bridge.send({"action": "ping"})
+    if resp and "tracks" in resp:
+        return resp["tracks"] - 1
+    return None
 
 
 def _dispatch(action: str, cmd: dict[str, Any], bridge: AbletonBridge) -> CommandResult:
@@ -166,8 +206,8 @@ def _dispatch(action: str, cmd: dict[str, Any], bridge: AbletonBridge) -> Comman
     if resp is None:
         return CommandResult(action=action, success=False, detail="No response from Ableton (timeout)")
     if resp.get("error"):
-        return CommandResult(action=action, success=False, detail=resp["error"])
-    return CommandResult(action=action, success=True, detail=resp.get("detail", "OK"))
+        return CommandResult(action=action, success=False, detail=resp["error"], raw_response=resp)
+    return CommandResult(action=action, success=True, detail=resp.get("detail", "OK"), raw_response=resp)
 
 
 def _handle_midi_generation(cmd: dict[str, Any]) -> CommandResult:
